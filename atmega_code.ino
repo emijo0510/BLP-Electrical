@@ -5,7 +5,7 @@ int FV02 = 6;
 int NV02 = 7;
 
 //spark
-int s1 = 38;
+int s1 = 3;
 
 //load cell
 #include "HX711.h"
@@ -67,6 +67,7 @@ void setup() {
     pinMode(FV03, OUTPUT);
     pinMode(FV02, OUTPUT);
     pinMode(NV02, OUTPUT);
+    pinMode(s1, OUTPUT);
 
   // Set pressure transducer pins as inputs
     pinMode(OPD02, INPUT);
@@ -175,12 +176,12 @@ void loop() {
     if (c == 'D') {
       /*
       digitalWrite(s1, HIGH);
-      delay(100); // 1 second fire
+      delay(100); 
       digitalWrite(s1, LOW);
       */
       digitalWriteFast(FV03, HIGH);
 
-      delay(20);
+      delay(400);
 
       digitalWrite(s1, HIGH);
       delay(100); // 1 second fire
