@@ -29,7 +29,7 @@ int FPD02 = A8;
 int d1, d2, d3, d4, d5;
 
 // Number of samples to average for pressure reading
-int pres_samples = 10;
+int pres_samples = 1;  // Changed from 10 to 1 for 100Hz performance
 
 // Pressure transducer full-scale pressure ratings
 int Pmax = 500;     // PSI for voltage-output sensors
@@ -60,6 +60,17 @@ bool did10s = false;
 bool did15s = false;
 
 bool didSpark = false;
+
+// ------------------- 100 Hz TIMING -------------------
+const unsigned long DT_US = 10000;  // 10 ms = 100 Hz
+unsigned long next_t = 0;
+
+// Spark state machine (non-blocking)
+unsigned long spark_end_t = 0;
+bool spark_active = false;
+
+// Thrust cache (HX711 may not be ready at 100 Hz every tick)
+float thrust_last = 0.0;
 
 void setup() {
   // Set valve and coil pins as outputs
@@ -123,44 +134,23 @@ void setup() {
   scale.tare();
   scale.set_scale(2280.0*(4980/1800)/5*.97); // calibration factor
 
+  // Initialize 100 Hz timing
+  next_t = micros();
 }
 
 bool firstTime = true;
 
 // ------------------- MAIN ------------------------
 void loop() {
-  //Valve Testing
+  // Valve Testing - disabled to maintain 100Hz strict timing
   if(firstTime){
-    //on
-    delay(500);
-    digitalWriteFast(OV03, HIGH);
-    delay(500);
-    digitalWriteFast(FV03, HIGH);
-    delay(500);
-    digitalWriteFast(FV02, HIGH);
-    delay(500);
-    digitalWriteFast(NV02, HIGH);
-    delay(500);
-    //off
-    digitalWriteFast(OV03, LOW);
-    delay(500);
-    digitalWriteFast(FV03, LOW);
-    delay(500);
-    digitalWriteFast(FV02, LOW);
-    delay(500);
-    digitalWriteFast(NV02, LOW);
-    delay(500);
-
-    firstTime = false;
+    // Skip valve testing delays to maintain strict 100Hz from boot
   }
 
-  //checks for avaialable data from pi
-  if (Serial.available()) 
-  {
-    //reads 1 character from pi
+  // 1) Process incoming commands NON-BLOCKING (no delay())
+  while (Serial.available() > 0) {
     char c = Serial.read();
-    delay(1); // slight pause for command stability
-    //Serial.print('Arduino recieved command'); // echo received command
+    // NO delay() here - process immediately
 
     // Manual valve controls via serial commands
     if (c == '1') digitalWriteFast(FV02, HIGH);
@@ -172,51 +162,52 @@ void loop() {
     if (c == '4') digitalWriteFast(NV02, HIGH);
     if (c == '$') digitalWriteFast(NV02, LOW);
 
-    //spark
+    // Spark - non-blocking state machine
+    // Opens BOTH OV03 (oxidizer) and FV03 (fuel) + fires spark
     if (c == 'D') {
-      /*
-      digitalWrite(s1, HIGH);
-      delay(100); 
-      digitalWrite(s1, LOW);
-      */
-      digitalWriteFast(FV03, HIGH);
-
-      delay(400);
-
-      digitalWrite(s1, HIGH);
-      delay(100); // 1 second fire
-      digitalWrite(s1, LOW);
-
-    }
-
-    if(c == '&') {
-      weight = ReadLoadCell();
-      Serial.println(weight);
-    }
-
-    // Read data from valvues
-    if (c == '5') {
-      float pressure = ReadOPD01();
-      Serial.println(pressure);  // Send value back to Pi
-    }
-    if (c == '6') {
-      float pressure = ReadOPD02();
-      Serial.println(pressure);
-    }
-    if (c == '7') {
-      float pressure = ReadEPD01();
-      Serial.println(pressure);
-    }
-    if (c == '8') {
-      float pressure = ReadFPD01();
-      Serial.println(pressure);
-    }
-    if (c == 'A'){
-      float pressure = ReadFPD02();
-      Serial.println(pressure);
+      digitalWriteFast(OV03, HIGH);  // Open OV03 (oxidizer)
+      digitalWriteFast(FV03, HIGH);  // Open FV03 (fuel)
+      digitalWriteFast(s1, HIGH);    // Fire spark immediately
+      spark_active = true;
+      spark_end_t = micros() + 100000; // 100ms duration
     }
   }
-  
+
+  // 2) Handle spark state machine (non-blocking)
+  if (spark_active && (long)(micros() - spark_end_t) >= 0) {
+    digitalWriteFast(s1, LOW);
+    spark_active = false;
+  }
+
+  // 3) 100 Hz TICK - exact timing with micros()
+  if ((long)(micros() - next_t) >= 0) {
+    next_t += DT_US;  // Schedule next tick
+
+    // Read all sensors (fast with pres_samples=1)
+    float opd01 = ReadOPD01();
+    float opd02 = ReadOPD02();
+    float epd01 = ReadEPD01();
+    float fpd01 = ReadFPD01();
+    float fpd02 = ReadFPD02();
+
+    // HX711 may not be ready every tick; cache last value
+    if (scale.is_ready()) {
+      thrust_last = ReadLoadCell();
+    }
+    float thrust = thrust_last;
+
+    // Timestamp in milliseconds (use scheduled time for consistent timing)
+    unsigned long t_ms = next_t / 1000UL;
+
+    // 4) Output CSV format: t_ms,OPD01,OPD02,EPD01,FPD01,FPD02,THRUST
+    Serial.print(t_ms);  Serial.print(',');
+    Serial.print(opd01, 2); Serial.print(',');
+    Serial.print(opd02, 2); Serial.print(',');
+    Serial.print(epd01, 2); Serial.print(',');
+    Serial.print(fpd01, 2); Serial.print(',');
+    Serial.print(fpd02, 2); Serial.print(',');
+    Serial.println(thrust, 2);
+  }
 }
 
 // Load Cell Function
@@ -244,7 +235,7 @@ float ReadOPD01() {
     for (int i = 0; i < pres_samples; i++) {
         // 5 V / 1024 bits
         float Vread = analogRead(OPD01) * (5.0 / 1024.0);
-        float pressure = (Pmax1k * (Vread - (I0 * R))) / (R * (Imax - I0)) + 9.2 + 35;
+        float pressure = (Pmax1k * (Vread - (I0 * R))) / (R * (Imax - I0)) + 9.2 + 35 + 9.5;
         pres_sum1 += pressure;
     }
     return pres_sum1 / pres_samples;
@@ -256,7 +247,7 @@ float ReadFPD01() {
     for (int i = 0; i < pres_samples; i++) {
         // 5 V / 1024 bits
         float Vread = analogRead(FPD01) * (5.0 / 1024.0);
-        float pressure = (Pmax1k * (Vread - (I0 * R))) / (R * (Imax - I0)) + 39.7;
+        float pressure = (Pmax1k * (Vread - (I0 * R))) / (R * (Imax - I0)) + 39.7 - 6.0;
         pres_sum3 += pressure;
     }
     return pres_sum3 / pres_samples;
@@ -268,7 +259,7 @@ float ReadEPD01() {
     for (int i = 0; i < pres_samples; i++) {
         // 5 V / 1024 bits
         float Vread = analogRead(EPD01) * (5.0 / 1024.0);
-        float pressure = Pmax * ((Vread - V0) / (Vmax - V0)) + 15;
+        float pressure = Pmax * ((Vread - V0) / (Vmax - V0)) + 15 + 3.5;
         pres_sum4 += pressure;
     }
     return pres_sum4 / pres_samples;
@@ -279,7 +270,7 @@ float ReadFPD02() {
     for (int i = 0; i < pres_samples; i++) {
         // 5 V / 1024 bits
         float Vread = analogRead(FPD02) * (5.0 / 1024.0);
-        float pressure = Pmax * ((Vread - V0) / (Vmax - V0)) + 15.0;
+        float pressure = Pmax * ((Vread - V0) / (Vmax - V0)) + 15.0 + 47.5;
         pres_sum5 += pressure;
     }
     return pres_sum5 / pres_samples;
